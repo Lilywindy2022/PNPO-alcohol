@@ -1,0 +1,409 @@
+---
+title: "PNPO-Alcohol study metabolomics data analysis"
+output: html_document
+date: '2024_04_05'
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r}
+ # if (!requireNamespace('BiocManager', quietly = TRUE))
+ #    install.packages('BiocManager')
+ # 
+ #  BiocManager::install('EnhancedVolcano')
+```
+
+#load libraries
+
+```{r, warning=FALSE}
+suppressPackageStartupMessages(library(circlize))
+suppressPackageStartupMessages(library(ComplexHeatmap))
+suppressPackageStartupMessages(library(dendextend))
+suppressPackageStartupMessages(library(dplyr))
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(xlsx)
+library(ComplexHeatmap)
+library(circlize)
+library(dendsort)
+library(dendextend)
+library(ggpubr)
+library(FactoMineR)
+library(factoextra)
+library(VennDiagram)
+```
+
+# read data and data cleaning
+
+```{r}
+rm(list=ls())
+
+dir.create("output")
+data= read.xlsx("metabolite.xlsx", sheetIndex = 1, startRow= 11, header = TRUE)
+
+#used positive quality controls to calculate variance and to exclude the metabolites with >30% CV for the further statistical analysis
+data <- data %>%
+        filter(!Metabolite %in% c("Dopamine", "2-phosphoglycerate"))
+
+data0 <- data[,-c(2:7, 26:37)] 
+
+write.csv(data0, file = "output/data_clean.csv")
+```
+
+# get meta information
+
+```{r}
+rm(list=ls())
+dat0 = read.csv(file = "output/data_clean.csv")
+dat = dat0[,-1]
+dat = t(dat[,-1])
+colnames(dat) <- dat0[,2]
+
+
+grp = vector()
+ID = vector()
+geno = vector()
+treatment = vector()
+for (i in 1:nrow(dat)) {
+  sample = gsub("Norm..Area..", "", rownames(dat)[i])
+  a = strsplit(sample, "_")
+  g = a[[1]][1]
+  geno = append(geno, g)
+  t = a[[1]][2]
+  treatment = append(treatment, t)
+  group0 = paste(g, "_", t, sep = "")
+  grp = append(grp, group0)
+  ID0 = a[[1]][3]
+  ID1 = strsplit(ID0, "\\.")
+  ID2 = ID1[[1]][1]
+  ID = append(ID, ID2)
+}
+
+data = data.frame(grp, ID, geno, treatment, dat)
+
+write.csv(data, file = "output/sum.csv")
+```
+
+# PCA analysis
+
+```{r}
+rm(list=ls())
+
+dat0 = read.csv(file = "output/sum.csv")
+dat = dat0[,-c(1:5)]
+
+
+res.pca = PCA(dat, scale.unit= TRUE, ncp = 5, graph = FALSE)
+#summary(res.pca,nbelements = Inf)
+a = res.pca[[2]][[4]]
+write.csv(a, file = "output/dimention.csv")
+
+#eig.val <- get_eigenvalue(res.pca)
+
+#dimention
+a = fviz_eig(res.pca, addlabels = TRUE, ylim = c(0, 50)) +
+    theme(axis.title = element_text(size = 12),
+          axis.text = element_text(size = 10))
+
+ggsave(a, file = "output/scree.png", width = 6, height = 3)
+
+#plot
+ind.p <- fviz_pca_ind(res.pca, geom.ind = "point", pointshape = 21, pointsize = 4, fill.ind = dat0$grp, mean.point = FALSE, addEllipses = TRUE, ellipse.type = "confidence")
+
+f = ggpubr::ggpar(ind.p,
+              title = "PCA",
+              xlab = "PC1: variance explained 33.3%", ylab = "PC2: variance explained 17.9%",
+              legend.title = "Group", legend.position = "top",
+              ggtheme = theme_bw(),
+              palette = c("h.D33V_0" ="#41b6c4","h.D33V_1" ="#4191af","h.R116Q_0" ="#2c7fb8","h.R116Q_1"="#2c6198","h.WT_0"="#a0a0a4","h.WT_1"="#a0a08f")
+              ) +
+    theme(legend.position =  "null",
+          axis.title = element_text(size = 9),
+          axis.text = element_text(size = 8))
+ggsave(f, file = "output/pca.png", width = 2.2, height = 3)
+
+```
+
+# statistical analysis
+
+```{r}
+rm(list=ls())
+
+dat0 = read.csv(file = "output/sum.csv")
+
+dat_l  = dat0 %>%
+         gather(6:ncol(dat0), key = "metabolite", value = "level")
+
+m = unique(dat_l$metabolite)
+
+p_geno = vector()
+p_treatment = vector()
+p_interaction = vector()
+for (i in 1:length(m)) {
+  a = dat_l %>% filter(metabolite == m[i])
+  fit = lm(level ~ geno*treatment, data = a)
+  g0 = anova(fit)$'Pr(>F)'[1]
+  t0 = anova(fit)$'Pr(>F)'[2]
+  i0 = anova(fit)$'Pr(>F)'[3]
+  p_geno = append(p_geno, g0)
+  p_treatment = append(p_treatment, t0)
+  p_interaction = append(p_interaction, i0)
+}
+
+p_geno_adjust = p.adjust(p_geno)
+p_treatment_adjust = p.adjust(p_treatment)
+p_interaction_adjust = p.adjust(p_interaction)
+
+
+data = data.frame(m, p_geno, p_treatment, p_interaction,p_geno_adjust, p_treatment_adjust, p_interaction_adjust)
+
+write.csv(data, file = "output/pvalue.csv")
+```
+
+# venn diagram
+
+```{r, warning=FALSE}
+rm(list=ls())
+
+data = read.csv(file = "output/pvalue.csv")
+
+n_interaction = data %>%
+                filter(p_interaction_adjust < 0.05)
+
+n_geno = data %>%
+                filter(p_geno_adjust < 0.05)
+
+n_treatment = data %>%
+                filter(p_treatment_adjust < 0.05)
+
+p_sig = rbind(n_interaction, n_geno, n_treatment)
+
+p_sig = p_sig[,-1]
+p_sig = unique(p_sig)
+write.csv(p_sig, file = "output/p_sig.csv")
+
+n_gt = intersect(n_geno$m, n_treatment$m)
+n_gi = intersect(n_interaction$m, n_geno$m)
+n_ti = intersect(n_interaction$m, n_treatment$m)
+
+n_gti = intersect(n_gi, n_ti)
+
+# Create Venn diagram
+x_venn <- list(
+  "genotype" = c(1:3,5:15,16:36),
+  "treatment" = c(1:3,4, 5:15,100:168),
+  "geno:treatment interaction" = c(1:3,4)
+)
+
+  venn_object <- venn.diagram(
+    x_venn,
+    filename = NULL,
+    disable.logging = TRUE,
+    category.names = names(x_venn),
+    fill = c("#673bb8","#ffb60f", "#c13832"),
+    cex = 1,
+    cat.cex = 1,
+    cat.dist = c(0.07, 0.07, 0.21),
+    lwd = 0.75
+  )
+  
+  grid.draw(venn_object)
+  
+  ggsave(venn_object, file = "output/venn.png", width = 5.6, height = 5.6)
+```
+
+# heatmap
+
+```{r}
+rm(list=ls())
+
+dat0 = read.csv(file = "output/sum.csv")
+
+#normalize to h.WT_0
+dat_n = dat0 %>%
+        gather(6:ncol(dat0), key = m, value = raw.values) 
+
+s = dat_n %>%
+    filter(grp == "h.WT_0") %>%
+    group_by(geno,m) %>%
+    summarise(mean = mean(raw.values), total = n())
+
+#add ctrl values to the dataframe
+dat2 = merge(dat_n, s[,c(2:3)], by = "m")
+
+dat2 = dat2 %>%
+       mutate(normalized.value = raw.values/mean)
+
+#get significant items
+p <- read.csv(file = "output/p_sig.csv")
+
+dat2p <- subset(dat2, m %in% p$m)
+
+
+dat3 = dat2p[,-c(2,7:8)] %>%
+  spread(m, normalized.value)
+
+dat = t(dat3[,-c(1:4)])
+
+
+heat <- as.matrix(dat)
+heat <- log2(heat)
+
+metabolite = rownames(heat)
+geno = dat0$geno
+treatment = dat0$treatment
+grp = dat3$grp
+
+col_anno = colorRamp2(c(0, 2, 3), c("blue", "white", "red")) 
+
+column_ha = HeatmapAnnotation(group = grp, col = list(group = c("h.D33V_0" ="#41b6c4","h.D33V_1" ="#4191af","h.R116Q_0" ="#2c7fb8","h.R116Q_1"="#2c6198","h.WT_0"="#a0a0a4","h.WT_1"="#a0a08f")))
+
+
+# Set color scheme and choose breaks
+myCol <- colorRamp2(
+  c(min(heat), median(heat), max(heat)),
+  c("#1b9e77", "#e0e0e0", "#e7298a")
+)
+
+row_dend = as.dendrogram(hclust(dist(heat)))
+
+
+ht = Heatmap(heat, 
+             col = myCol,
+             row_gap = unit(0.8, "mm"),
+             column_gap = unit(1, "mm"),
+             rect_gp = gpar(col = "white"),
+             row_title = NULL,
+             cluster_rows = row_dend,
+             show_row_dend = TRUE,
+             row_dend_side = "left",
+             show_row_names = FALSE,
+             row_names_gp = gpar(fontsize = 8),
+             cluster_columns = TRUE,
+             show_column_dend = TRUE,
+             show_column_names = TRUE,
+             column_names_gp = gpar(fontsize = 8),
+             row_dend_width = unit(0.8, "cm"),
+             row_dend_reorder = TRUE,
+             top_annotation = column_ha,
+             show_heatmap_legend = TRUE,  
+             heatmap_legend_param = list(
+                                   title = "Metabolite",
+                                   at = c(min(heat), median(heat), max(heat)),
+                                   title_gp = gpar(fontsize = 12),
+                                   labels = c("low", "median", "high"),
+                                   labels_gp = gpar(fontsize = 10),
+                                   legend_height = unit(2, "cm"),
+                                   legend_width = unit(0.5, "cm")
+                                   
+                          )
+)
+
+png(filename = "output/heatmap.png", width = 6, height = 6, units = "in", res = 300)
+draw(ht, heatmap_legend_side = "left", annotation_legend_side = "left")
+
+dev.off()
+```
+
+
+#Pathway analysis 
+#data from https://www.metaboanalyst.ca
+
+# pathway from online (Dmel KEGG), plot out
+
+```{r}
+rm(list=ls())
+data = read.csv("pathway_results_treatment.csv")
+
+for (i in 1:nrow(data)) {
+  if (data$Raw.p[i] <0.001) {
+    data$sig[i] <- "a"
+  }else if (data$Raw.p[i] <0.01) {
+    data$sig[i] <- "b"
+  }else if (data$Raw.p[i] <0.05) {
+    data$sig[i] <- "c"
+  }else {
+    data$sig[i] <- "d"
+  }
+}
+
+col = c("a" = "#4a1486", "b" = "#807dba", "c" = "#bcbddc", "d" = "gray")
+
+f = ggplot(data, aes(x = Impact, y = -log10(Raw.p))) +
+    geom_point(aes(color = sig, size = -log10(Raw.p))) +
+    scale_color_manual(values = col) +
+    ylab("-log10(p)") +
+    xlim(value = c(0,0.8)) +
+    ylim(value = c(0,6)) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.border = element_blank(),
+           axis.line = element_line(colour = "black",linewidth =0.5),
+           axis.ticks = element_line(colour="black",linewidth =0.5),
+           axis.text = element_text(size = 8),
+           axis.title = element_text(size = 9, face = "bold"),
+           legend.position = "none",
+           legend.title = element_blank()) +
+     geom_hline(yintercept = 1.30103, color = "darkblue", linetype = "dotted", size =0.5)
+
+ggsave(f, file = "output/pathway_treatment.png", width = 3, height = 2)
+
+```
+
+# pathway from online (Dmel KEGG), plot out
+
+```{r}
+rm(list=ls())
+data = read.csv("pathway_results_genotype.csv")
+
+for (i in 1:nrow(data)) {
+  if (data$Raw.p[i] <0.001) {
+    data$sig[i] <- "a"
+  }else if (data$Raw.p[i] <0.01) {
+    data$sig[i] <- "b"
+  }else if (data$Raw.p[i] <0.05) {
+    data$sig[i] <- "c"
+  }else {
+    data$sig[i] <- "d"
+  }
+}
+
+col = c("a" = "#cc4c02", "b" = "#ec7014", "c" = "#fec44f", "d" = "gray")
+
+f = ggplot(data, aes(x = Impact, y = -log10(Raw.p))) +
+    geom_point(aes(color = sig, size = -log10(Raw.p))) +
+    scale_color_manual(values = col) +
+    ylab("-log10(p)") +
+    xlim(value = c(0,1)) +
+    ylim(value = c(0,3)) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+           panel.grid.minor=element_blank(),
+           panel.border = element_blank(),
+           axis.line = element_line(colour = "black",linewidth=0.5),
+           axis.ticks = element_line(colour="black",linewidth =0.5),
+           axis.text = element_text(size = 8),
+           axis.title = element_text(size = 9, face = "bold"),
+           legend.position = "none",
+           legend.title = element_blank()) +
+     geom_hline(yintercept = 1.30103, color = "darkblue", linetype = "dotted", size =0.5)
+
+ggsave(f, file = "output/pathway_genotype.png", width = 3, height = 2)
+
+```
+
+
+```{r}
+print(sessionInfo())
+```
+
+
+
+
+
