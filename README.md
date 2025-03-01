@@ -1,2 +1,2 @@
 # PNPO-alcohol
-PNPO-alcohol study in Drosophila
+Metabolomics analysis in PNPO knockin flies with or without alcohol exposure.
